@@ -24,6 +24,8 @@ func getPhotoHandler(w http.ResponseWriter, r *http.Request) {
 	immichURL := os.Getenv("IMMICH_URL") // e.g. http://10.0.0.5:2283
 	apiKey := os.Getenv("IMMICH_API_KEY")
 	albumID := os.Getenv("IMMICH_ALBUM_ID")
+	photoWidth := os.Getenv("PHOTO_WIDTH")
+	photoHeight := os.Getenv("PHOTO_HEIGHT")
 
 	client := &http.Client{Timeout: 30 * time.Second}
 
@@ -84,8 +86,8 @@ func getPhotoHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fill crops the image to exactly 1600x1200 without stretching
-	dst := imaging.Fill(src, 1600, 1200, imaging.Center, imaging.Lanczos)
+	// Fill crops the image to exactly photoWidth x photoHeight without stretching
+	dst := imaging.Fill(src, photoWidth, photoHeight, imaging.Center, imaging.Lanczos)
 
 	// E-ink optimization with +20% contrast on e-ink
 	dst = imaging.AdjustContrast(dst, 20.0)
