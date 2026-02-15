@@ -3,15 +3,30 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/draw"
+	_ "image/jpeg" // Register JPEG decoder
+	"image/png"    // Register PNG encoder
 	"log"
 	"math/rand"
 	"net/http"
-    "strconv"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/disintegration/imaging"
 )
+
+// Spectra 6 (ACeP) typically uses these 6 primary pigments
+var spectra6Palette = color.Palette{
+	color.RGBA{0, 0, 0, 255},       // Black
+	color.RGBA{255, 255, 255, 255}, // White
+	color.RGBA{255, 0, 0, 255},     // Red
+	color.RGBA{0, 255, 0, 255},     // Green
+	color.RGBA{0, 0, 255, 255},     // Blue
+	color.RGBA{255, 255, 0, 255},   // Yellow
+}
 
 type ImmichAsset struct {
 	ID string `json:"id"`
@@ -22,23 +37,19 @@ type AlbumResponse struct {
 }
 
 func getPhotoHandler(w http.ResponseWriter, r *http.Request) {
-	immichURL := os.Getenv("IMMICH_URL") // e.g. http://10.0.0.5:2283
+	immichURL := os.Getenv("IMMICH_URL")
 	apiKey := os.Getenv("IMMICH_API_KEY")
 	albumID := os.Getenv("IMMICH_ALBUM_ID")
 
-	// Convert PHOTO_WIDTH
-    photoWidth, err := strconv.Atoi(os.Getenv("PHOTO_WIDTH"))
-    if err != nil {
-        log.Printf("Invalid PHOTO_WIDTH, defaulting to 800: %v", err)
-        photoWidth = 800 // Fallback value
-    }
+	photoWidth, err := strconv.Atoi(os.Getenv("PHOTO_WIDTH"))
+	if err != nil {
+		photoWidth = 800 // Default to standard e-ink frame width
+	}
 
-    // Convert PHOTO_HEIGHT
-    photoHeight, err := strconv.Atoi(os.Getenv("PHOTO_HEIGHT"))
-    if err != nil {
-        log.Printf("Invalid PHOTO_HEIGHT, defaulting to 600: %v", err)
-        photoHeight = 600 // Fallback value
-    }
+	photoHeight, err := strconv.Atoi(os.Getenv("PHOTO_HEIGHT"))
+	if err != nil {
+		photoHeight = 480 // Default to standard e-ink frame height
+	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
 
@@ -55,15 +66,14 @@ func getPhotoHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == 403 {
-		log.Println("403 FORBIDDEN: Check if your API Key has 'all' or 'album.read' permissions!")
-		http.Error(w, "Immich permission denied", 403)
+	if resp.StatusCode != 200 {
+		log.Printf("Immich Error: %d", resp.StatusCode)
+		http.Error(w, "Immich API Error", resp.StatusCode)
 		return
 	}
 
 	var album AlbumResponse
 	if err := json.NewDecoder(resp.Body).Decode(&album); err != nil {
-		log.Printf("JSON Error: %v", err)
 		http.Error(w, "Failed to parse album", 500)
 		return
 	}
@@ -73,46 +83,65 @@ func getPhotoHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Pick a random photo
+	// 2. Pick random photo
 	rand.Seed(time.Now().UnixNano())
 	asset := album.Assets[rand.Intn(len(album.Assets))]
 
-	// 3. Fetch 'preview' (Immich converts .ARW to high-res JPG for us)
+	// 3. Fetch 'preview'
 	photoURL := fmt.Sprintf("%s/api/assets/%s/thumbnail?size=preview", immichURL, asset.ID)
-	log.Printf("Pulling photo: %s", asset.ID)
+	log.Printf("Processing photo: %s", asset.ID)
 
 	photoReq, _ := http.NewRequest("GET", photoURL, nil)
 	photoReq.Header.Set("x-api-key", apiKey)
 	photoResp, err := client.Do(photoReq)
 	if err != nil || photoResp.StatusCode != 200 {
-		log.Printf("Failed to fetch image: %d", photoResp.StatusCode)
 		http.Error(w, "Image fetch failed", 500)
 		return
 	}
 	defer photoResp.Body.Close()
 
-	// 4. Processing
+	// 4. Decode & Resize
 	src, err := imaging.Decode(photoResp.Body)
 	if err != nil {
-		log.Printf("Decode Error: %v (Ensure _ image/jpeg is imported!)", err)
+		log.Printf("Decode Error: %v", err)
 		http.Error(w, "Decode failed", 500)
 		return
 	}
 
-	// Fill crops the image to exactly photoWidth x photoHeight without stretching
+	// Crop/Fill to exact screen dimensions
 	dst := imaging.Fill(src, photoWidth, photoHeight, imaging.Center, imaging.Lanczos)
 
-	// E-ink optimization with +20% contrast on e-ink
-	dst = imaging.AdjustContrast(dst, 20.0)
+	// --- E-INK PRE-PROCESSING ---
 
-	// 5. Serve it
-	w.Header().Set("Content-Type", "image/jpeg")
-	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate") // Prevent stale images
-	imaging.Encode(w, dst, imaging.JPEG, imaging.JPEGQuality(100))
+	// Increase Contrast: E-ink looks washed out; bump contrast to separate darks/lights
+	dst = imaging.AdjustContrast(dst, 25.0)
+
+	// Increase Saturation: Standard photos are too subtle for the limited 6-color palette.
+	// Boosting saturation forces pixels closer to pure Red/Blue/Green/Yellow so the
+	// dithering algorithm picks them up.
+	dst = imaging.AdjustSaturation(dst, 40.0)
+
+	// --- DITHERING (Floyd-Steinberg) ---
+
+	// Create a new Paletted image with the Spectra 6 colors
+	dithered := image.NewPaletted(dst.Bounds(), spectra6Palette)
+
+	// Apply Floyd-Steinberg error diffusion
+	draw.FloydSteinberg.Draw(dithered, dst.Bounds(), dst, image.Point{})
+
+	// 5. Serve as PNG
+	// IMPORTANT: We serve PNG because JPEG compression destroys dithering artifacts
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+
+	// Encode to ResponseWriter
+	if err := png.Encode(w, dithered); err != nil {
+		log.Printf("Encoding Error: %v", err)
+	}
 }
 
 func main() {
 	http.HandleFunc("/photo", getPhotoHandler)
-	log.Println("zframe is live on :8080")
+	log.Println("Spectra 6 Dither-Server live on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
