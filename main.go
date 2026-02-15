@@ -6,6 +6,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+    "strconv"
 	"os"
 	"time"
 
@@ -24,8 +25,20 @@ func getPhotoHandler(w http.ResponseWriter, r *http.Request) {
 	immichURL := os.Getenv("IMMICH_URL") // e.g. http://10.0.0.5:2283
 	apiKey := os.Getenv("IMMICH_API_KEY")
 	albumID := os.Getenv("IMMICH_ALBUM_ID")
-	photoWidth := os.Getenv("PHOTO_WIDTH")
-	photoHeight := os.Getenv("PHOTO_HEIGHT")
+
+	// Convert PHOTO_WIDTH
+    photoWidth, err := strconv.Atoi(os.Getenv("PHOTO_WIDTH"))
+    if err != nil {
+        log.Printf("Invalid PHOTO_WIDTH, defaulting to 800: %v", err)
+        photoWidth = 800 // Fallback value
+    }
+
+    // Convert PHOTO_HEIGHT
+    photoHeight, err := strconv.Atoi(os.Getenv("PHOTO_HEIGHT"))
+    if err != nil {
+        log.Printf("Invalid PHOTO_HEIGHT, defaulting to 600: %v", err)
+        photoHeight = 600 // Fallback value
+    }
 
 	client := &http.Client{Timeout: 30 * time.Second}
 
